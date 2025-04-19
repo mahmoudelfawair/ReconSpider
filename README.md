@@ -18,8 +18,8 @@ Features
 Installation
 ------------
 ```bash
-git clone https://github.com/yourusername/recon-spider.git
-cd recon-spider
+git clone https://github.com/mahmoudelfawair/ReconSpider.git
+cd ReconSpider
 pip install -r requirements.txt
 ```
 
@@ -52,10 +52,3 @@ Sample Output
 - ⚠️ Yellow: HTML comments
 - ❗ Red: Sensitive files or paths
 - 🔍 Magenta: Detected correlation (comment mentions "file" and `/files/` exists)
-
-License
--------
-MIT License
-
----
-Made with 🖤 for recon workflows.
