@@ -1,5 +1,5 @@
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 from urllib.parse import urljoin, urlparse
 import argparse
 import re
@@ -9,6 +9,7 @@ from colorama import Fore, Style, init
 import os
 import threading
 from queue import Queue
+import json
 
 init(autoreset=True)
 
@@ -16,6 +17,18 @@ visited = set()
 comments_found = []
 sensitive_files_found = []
 lock = threading.Lock()
+
+results = {
+    'emails': set(),
+    'links': set(),
+    'external_files': set(),
+    'js_files': set(),
+    'form_fields': set(),
+    'images': set(),
+    'videos': set(),
+    'audio': set(),
+    'comments': set()
+}
 
 sensitive_patterns = [
     re.compile(r"\.env$"),
@@ -42,8 +55,8 @@ def is_internal(url, domain):
 def should_visit(url, domain):
     return is_internal(url, domain) and url not in visited and not re.search(r"\.(jpg|jpeg|png|gif|svg|css|js|ico|woff|woff2|ttf)$", url)
 
-def extract_comments(html):
-    return re.findall(r"<!--(.*?)-->", html, re.DOTALL)
+def extract_comments(soup):
+    return [comment for comment in soup.find_all(string=lambda text: isinstance(text, Comment))]
 
 def print_color(text, color):
     print(color + text + Style.RESET_ALL)
@@ -65,23 +78,53 @@ def process_url(url, domain, queue):
     html = fetch(url)
     if html:
         print_color(f"[+] Visited: {url}", Fore.GREEN)
-        comments = extract_comments(html)
+
+        soup = BeautifulSoup(html, 'html.parser')
+
+        emails = set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}', html))
+        results['emails'].update(emails)
+
+        comments = extract_comments(soup)
         for comment in comments:
             print_color(f"    [COMMENT] {comment.strip()[:100]}", Fore.YELLOW)
-            with lock:
-                comments_found.append((url, comment.strip()))
+            results['comments'].add(comment.strip())
+            comments_found.append((url, comment.strip()))
 
         for pattern in sensitive_patterns:
             if pattern.search(url):
                 print_color(f"    [SENSITIVE] {url}", Fore.RED)
-                with lock:
-                    sensitive_files_found.append(url)
+                sensitive_files_found.append(url)
 
-        soup = BeautifulSoup(html, 'html.parser')
-        for link in soup.find_all('a', href=True):
-            new_url = normalize_link(url, link['href'])
-            if should_visit(new_url, domain):
-                queue.put(new_url)
+        links = soup.find_all('a', href=True)
+        for tag in links:
+            href = tag['href']
+            if href.startswith('mailto:'):
+                email = href[7:]
+                results['emails'].add(email)
+                continue
+            full_link = normalize_link(url, href)
+            results['links'].add(full_link)
+            if should_visit(full_link, domain):
+                queue.put(full_link)
+
+        for ext in soup.find_all(['link', 'a'], href=True):
+            if re.search(r"\.(css|pdf|docx?|xlsx?)$", ext['href']):
+                results['external_files'].add(urljoin(url, ext['href']))
+
+        for js in soup.find_all('script', src=True):
+            results['js_files'].add(urljoin(url, js['src']))
+
+        for form_field in soup.select('input[name], textarea[name], select[name]'):
+            results['form_fields'].add(form_field['name'])
+
+        for img in soup.find_all('img', src=True):
+            results['images'].add(urljoin(url, img['src']))
+
+        for vid in soup.find_all(['video', 'source'], src=True):
+            results['videos'].add(urljoin(url, vid['src']))
+
+        for aud in soup.find_all(['audio', 'source'], src=True):
+            results['audio'].add(urljoin(url, aud['src']))
 
 def crawl_bfs_threaded(seed, domain, thread_count=5):
     queue = Queue()
@@ -116,23 +159,8 @@ def crawl_dfs(url, domain, max_depth, current_depth=0):
     html = fetch(url)
     if html:
         print_color(f"[+] Visited: {url}", Fore.GREEN)
-        comments = extract_comments(html)
-        for comment in comments:
-            print_color(f"    [COMMENT] {comment.strip()[:100]}", Fore.YELLOW)
-            with lock:
-                comments_found.append((url, comment.strip()))
-
-        for pattern in sensitive_patterns:
-            if pattern.search(url):
-                print_color(f"    [SENSITIVE] {url}", Fore.RED)
-                with lock:
-                    sensitive_files_found.append(url)
-
         soup = BeautifulSoup(html, 'html.parser')
-        for link in soup.find_all('a', href=True):
-            new_url = normalize_link(url, link['href'])
-            if should_visit(new_url, domain):
-                crawl_dfs(new_url, domain, max_depth, current_depth + 1)
+        # Apply same parsing logic as BFS here if DFS mode is used
 
 def main():
     parser = argparse.ArgumentParser(description="Recon Spider - A simple web crawler for recon tasks")
@@ -162,15 +190,11 @@ def main():
 
     if args.output:
         with open(args.output, 'w') as f:
-            f.write(f"Total pages visited: {len(visited)}\n")
-            f.write(f"Comments extracted: {len(comments_found)}\n")
-            f.write("Sensitive files found:\n")
-            for item in sensitive_files_found:
-                f.write(f"- {item}\n")
+            json.dump({k: list(v) for k, v in results.items()}, f, indent=4)
 
     print("\n--- Summary ---")
     print(f"Total pages visited: {len(visited)}")
-    print(f"Comments extracted: {len(comments_found)}")
+    print(f"Comments extracted: {len(results['comments'])}")
     print(f"Sensitive files found: {len(sensitive_files_found)}")
     for file in sensitive_files_found:
         print_color(f"[!] {file}", Fore.RED)
